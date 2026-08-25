@@ -1,0 +1,29 @@
+.env
+card_map.json
+draft_log.csv
+human_vs_ai_score.json
+data/
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.wav
+
+# --- GitHub polish pass ---
+# Raw video/render output (2.4 GB — never ship)
+edit_output/
+*.mp4
+*.mkv
+# Logs
+*.log
+# Data hygiene — never ship real data
+*.csv
+*.xlsx
+exports/
+outputs/
+# Local agent settings
+.claude/settings.local.json
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/

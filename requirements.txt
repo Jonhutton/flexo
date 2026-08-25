@@ -1,0 +1,26 @@
+# Flexo Voice Agent v1 — pinned, minimal dependencies.
+# Python 3.11+ recommended.
+
+anthropic==0.69.0          # Claude API (pick recommendations + persona)
+PyYAML==6.0.2              # config.yaml
+requests==2.32.3           # 17Lands data fetch (Scryfall uses stdlib urllib)
+
+# Web overlay for OBS (browser source)
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# Voice output (TTS) — edge-tts is the free fallback; ElevenLabs uses requests
+edge-tts>=7.2.8           # <7.2 hits a 403 from Microsoft's endpoint; keep current
+
+# Voice input (push-to-talk STT), local, CPU-capable
+faster-whisper==1.1.0
+
+# Audio playback + mic capture, and the global hotkeys (F8 talk, F9 vision)
+sounddevice==0.5.1
+soundfile==0.12.1
+numpy==2.2.1
+pynput==1.7.7
+
+# Vision input layer (v2): screen capture + image downscale for the vision API
+mss==10.2.0
+Pillow==12.2.0

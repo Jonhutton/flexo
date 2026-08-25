@@ -1,0 +1,96 @@
+# Flexo Voice Agent — configuration.
+# Everything here can be tuned without touching code.
+# API keys are NEVER stored here — they come from environment variables
+# (ANTHROPIC_API_KEY, ELEVENLABS_API_KEY). See .env.example.
+
+claude:
+  # Live pick calls run 40+ times per draft and must speak within ~3s.
+  # Haiku 4.5 is the fast default; swap to claude-opus-4-8 for stronger picks.
+  model: "claude-haiku-4-5"
+  max_tokens: 400          # persona keeps replies short; headroom so JSON never truncates
+
+vision:
+  # v2 input layer: Flexo SEES the pick screen (screenshot -> Claude vision ->
+  # validated card names). Vision is the source of truth; the log parser stays
+  # as an optional cross-check below. Set enabled: false to run the old
+  # log-driven path.
+  enabled: true
+  hotkey: "f9"             # press on a pick screen to show Flexo the pack
+                           # (F8 stays push-to-talk)
+  trigger_mode: "hotkey"   # hotkey | auto. auto polls a tiny screen thumbnail
+                           # and fires when the screen settles on something new
+                           # — costs more vision calls than hotkey mode.
+  auto_poll_seconds: 2.0   # auto mode: thumbnail poll interval
+  auto_cooldown_seconds: 8.0   # auto mode: min seconds between vision calls
+  # Vision model: reading 15 small card names correctly is the entire point of
+  # this upgrade, so default to the strongest model. If cost/latency bites,
+  # drop to claude-haiku-4-5 (and set effort: null — Haiku doesn't take it);
+  # the fuzzy validator below catches most misreads either way.
+  model: "claude-opus-5"
+  effort: "low"            # perception task; low keeps it fast + cheap.
+                           # null to omit (required for Haiku models).
+  max_tokens: 4000         # covers thinking + the JSON card list
+  # THE one config change per set release: the current Quick Draft set code.
+  # Used for the Scryfall card list (validation) and 17Lands ratings.
+  set_code: "ECL"
+  match_threshold: 0.82    # fuzzy-match ratio below which a card name is
+                           # FLAGGED instead of auto-corrected
+  max_image_long_edge: 2048  # downscale screenshots to this before the API
+  jpeg_quality: 85
+  captures_dir: "captures"   # per-session screenshot folders (debug/replay)
+  log_cross_check: true    # also tail Player.log for pick events + draft end
+
+seventeen_lands:
+  # Which 17Lands dataset to pull stats from. The set code is detected
+  # automatically from the Arena log's EventName (e.g. QuickDraft_SOS_... -> SOS).
+  format: "QuickDraft"     # QuickDraft | PremierDraft | TradDraft
+  cache_hours: 12          # re-fetch a set's ratings at most this often
+
+tts:
+  # provider is chosen automatically at runtime:
+  #   elevenlabs  if ELEVENLABS_API_KEY is set
+  #   edge        (free) otherwise
+  # Set `force_provider` to pin one explicitly.
+  force_provider: elevenlabs   # chosen: use ElevenLabs. Needs ELEVENLABS_API_KEY;
+                               # if the key is missing it warns and falls back to edge.
+  elevenlabs_voice_id: "lH7ECHx0s4NMOsSoHA2l"   # Flexo's robot-wizard voice
+  model: "eleven_flash_v2_5"   # ElevenLabs model tier. flash = fastest (banter
+                               # quality); A/B against eleven_turbo_v2_5 for
+                               # fidelity. (Old key `elevenlabs_model` still read.)
+  streaming: true              # stream + play audio chunks as they arrive instead
+                               # of waiting for full generation (ElevenLabs only;
+                               # edge-tts fallback stays non-streaming)
+  output_format: "pcm_22050"   # streaming wire format; must be pcm_* to stream
+                               # (raw PCM plays chunk-by-chunk; MP3 can't).
+                               # pcm_16000|pcm_22050|pcm_24000; non-pcm disables streaming.
+  edge_voice: "en-GB-RyanNeural"                # dry British fallback if no EL key
+
+voice_input:
+  hotkey: "f8"             # hold to talk; released -> transcribe. F8 DOWN also
+                           # hard-interrupts Flexo (barge-in): audio dies mid-word
+                           # and all queued lines are flushed.
+  whisper_model: "small"   # faster-whisper size: tiny|base|small|medium
+  device: "cpu"            # cpu | cuda
+  sample_rate: 16000
+  early_stt: true            # transcribe speech WHILE F8 is held (segments cut at
+                             # silence gaps), so only the tail remains at release
+  silence_ms: 600            # silence gap that closes an early-STT segment
+  silence_rms: 0.008         # mic RMS below this counts as silence (raise if a
+                             # noisy mic never cuts segments)
+  min_segment_seconds: 1.2   # never cut a segment shorter than this
+
+web:
+  host: "127.0.0.1"
+  port: 7337               # OBS browser source -> http://127.0.0.1:7337
+
+log:
+  # Leave null to auto-detect the Windows Arena Player.log location.
+  # Override with an absolute path if Arena is on another drive.
+  path: null
+  poll_seconds: 0.4
+
+paths:
+  card_map: "card_map.json"              # cached Scryfall arena_id -> name
+  draft_log_csv: "draft_log.csv"         # per-pick disagreement record
+  score_json: "human_vs_ai_score.json"   # running Human vs AI tally
+  data_dir: "data"                       # 17Lands cache lives here

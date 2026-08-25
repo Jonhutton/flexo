@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Flexo Overlay</title>
+<style>
+  :root {
+    --navy: #0b1026;
+    --navy-2: #141b3c;
+    --gold: #e8b64a;
+    --green: #3ef08a;
+    --dim: #8a93b8;
+    --text: #eef1ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: transparent; }
+  body {
+    font-family: "Consolas", "SF Mono", ui-monospace, monospace;
+    color: var(--text);
+    padding: 10px;
+  }
+  .panel {
+    width: 400px;
+    background: linear-gradient(180deg, var(--navy) 0%, var(--navy-2) 100%);
+    border: 1px solid rgba(232, 182, 74, .55);
+    border-radius: 12px;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, .55);
+    overflow: hidden;
+  }
+  .head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    padding: 12px 16px 8px;
+    border-bottom: 1px solid rgba(232, 182, 74, .25);
+  }
+  .brand { color: var(--gold); font-weight: 700; letter-spacing: 2px; font-size: 20px; }
+  .loc { color: var(--dim); font-size: 14px; }
+  .loc b { color: var(--green); }
+
+  .says {
+    padding: 12px 16px;
+    border-bottom: 1px solid rgba(232, 182, 74, .18);
+  }
+  .says .label { color: var(--gold); font-size: 12px; letter-spacing: 2px; }
+  .says .line { font-size: 18px; line-height: 1.35; margin-top: 4px; }
+
+  .picks { padding: 8px 12px 12px; }
+  .pick {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 8px; border-radius: 8px;
+  }
+  .pick.top { background: rgba(232, 182, 74, .12); }
+  .rank { color: var(--gold); font-weight: 700; width: 16px; text-align: center; }
+  .name { flex: 1; font-size: 17px; }
+  .wr { color: var(--green); font-size: 17px; font-variant-numeric: tabular-nums; }
+
+  .foot {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 16px 12px;
+    border-top: 1px solid rgba(232, 182, 74, .25);
+  }
+  .conf { font-size: 13px; color: var(--dim); }
+  .conf b { color: var(--gold); text-transform: uppercase; letter-spacing: 1px; }
+  .score { font-size: 15px; letter-spacing: 1px; }
+  .score .lbl { color: var(--dim); }
+  .score .h, .score .a { color: var(--green); font-weight: 700; }
+  .plan { padding: 0 16px 10px; color: var(--dim); font-size: 12px; }
+  .plan b { color: var(--text); }
+</style>
+</head>
+<body>
+  <div class="panel">
+    <div class="head">
+      <span class="brand">FLEXO</span>
+      <span class="loc">Pack <b id="pack">0</b> · Pick <b id="pick">0</b> · <b id="set">--</b></span>
+    </div>
+    <div class="says">
+      <div class="label">FLEXO SAYS:</div>
+      <div class="line" id="spoken">Flexo is booting up...</div>
+    </div>
+    <div class="picks" id="picks"></div>
+    <div class="plan">plan: <b id="plan">undeclared (open)</b></div>
+    <div class="foot">
+      <span class="conf">confidence: <b id="conf">--</b></span>
+      <span class="score"><span class="lbl">HUMAN</span> <span class="h" id="human">0</span>
+        <span class="lbl">–</span> <span class="a" id="ai">0</span> <span class="lbl">AI</span></span>
+    </div>
+  </div>
+
+<script>
+  function render(s) {
+    document.getElementById("set").textContent = s.set || "--";
+    document.getElementById("pack").textContent = s.pack || 0;
+    document.getElementById("pick").textContent = s.pick || 0;
+    document.getElementById("spoken").textContent = s.spoken || "";
+    document.getElementById("plan").textContent = s.plan || "undeclared (open)";
+    document.getElementById("conf").textContent = s.confidence || "--";
+    document.getElementById("human").textContent = s.human || 0;
+    document.getElementById("ai").textContent = s.ai || 0;
+
+    const box = document.getElementById("picks");
+    box.innerHTML = "";
+    (s.picks || []).slice(0, 3).forEach((p, i) => {
+      const row = document.createElement("div");
+      row.className = "pick" + (i === 0 ? " top" : "");
+      const wr = (p.gih_wr === null || p.gih_wr === undefined)
+        ? "--" : (p.gih_wr * 100).toFixed(1) + "%";
+      row.innerHTML =
+        '<span class="rank">' + (i + 1) + '</span>' +
+        '<span class="name"></span>' +
+        '<span class="wr">' + wr + '</span>';
+      row.querySelector(".name").textContent = p.name || "";
+      box.appendChild(row);
+    });
+  }
+
+  function connect() {
+    const ws = new WebSocket("ws://" + location.host + "/ws");
+    ws.onmessage = (ev) => { try { render(JSON.parse(ev.data)); } catch (e) {} };
+    ws.onclose = () => setTimeout(connect, 1000);   // auto-reconnect
+    ws.onerror = () => ws.close();
+  }
+  connect();
+</script>
+</body>
+</html>
