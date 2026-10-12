@@ -43,6 +43,31 @@ class VisionPack:
     flagged: list[str] = field(default_factory=list)   # unmatched raw reads
     picked_so_far: list[str] = field(default_factory=list)
     notes: str = ""
+    ranking: list = field(default_factory=list)        # picker.ScoredCard dicts
+    unknown_slots: list = field(default_factory=list)  # slots we couldn't name
+
+
+class PackCounter:
+    """Infer pack/pick numbers from how many cards are on screen.
+
+    The crops path never reads the "Pack 1, Pick 4" caption — it only sees card
+    rectangles. But the count alone is unambiguous: a pack starts at `pack_size`
+    and ticks down by one per pick, so a count that goes UP means a new pack was
+    dealt. The log cross-check corrects this if it ever drifts.
+    """
+
+    def __init__(self, pack_size: int = 14):
+        self.pack_size = pack_size
+        self.pack_number = 0
+        self.pick_number = 0
+        self._last_count = 0
+
+    def observe(self, n_cards: int) -> tuple:
+        if n_cards >= self.pack_size or n_cards > self._last_count:
+            self.pack_number += 1
+        self.pick_number = max(1, self.pack_size - n_cards + 1)
+        self._last_count = n_cards
+        return self.pack_number, self.pick_number
 
 
 class VisionPipeline:
@@ -60,11 +85,24 @@ class VisionPipeline:
         auto_cooldown_seconds: float = 8.0,
         auto_change_threshold: float = 0.04,
         timings: bool = False,
+        identifier=None,                         # vision.CardIdentifier
+        vision_cfg: Optional[dict] = None,       # detection / pack_region / pack_size
+        cards: Optional[dict] = None,            # name -> Scryfall record
+        ratings: Optional[dict] = None,          # name -> 17Lands row
+        picker_cfg=None,                         # picker.PickerConfig
     ):
         self.set_code = set_code
         self.capture = capture
         self.extractor = extractor
         self.validator = validator
+        # Crops path: read each card on its own, then rank deterministically.
+        # Falls back to the whole-screen extractor when no identifier is given.
+        self.identifier = identifier
+        self.vision_cfg = vision_cfg or {}
+        self.cards = cards or {}
+        self.ratings = ratings or {}
+        self.picker_cfg = picker_cfg
+        self.counter = PackCounter(int(self.vision_cfg.get("pack_size", 14)))
         self.on_pack = on_pack
         self.on_my_pick = on_my_pick
         self.hotkey_name = hotkey
@@ -152,6 +190,14 @@ class VisionPipeline:
             cap = self.capture.capture(tag=source)
             if cap is None:
                 return None
+
+            if self.identifier is not None:
+                pack = self.process_crops(cap.image)
+                if self.timings:
+                    print(f"[timings] crops read: "
+                          f"{(time.perf_counter() - t0) * 1000:.0f}ms", flush=True)
+                return pack
+
             result = self.extractor.extract(cap.jpeg_bytes, cap.media_type)
             if result is None:
                 return None
@@ -161,6 +207,84 @@ class VisionPipeline:
             return self._process(result, cap)
         finally:
             self._busy.release()
+
+    # ------------------------------------------------------------- crops path
+    def process_crops(self, img) -> Optional[VisionPack]:
+        """Screenshot -> detect card rects -> read each name -> rank the pack.
+
+        Also the dry-run entry point, so a saved screenshot exercises exactly
+        the path a live pack takes.
+        """
+        if img is None:
+            return None
+        from .detect import crop_cards, crop_fraction, find_cards, name_banner
+        from .picker import rank_pack
+
+        frame = crop_fraction(img, self.vision_cfg.get("pack_region"))
+        boxes, mode = find_cards(frame, self.vision_cfg)
+        min_cards = int((self.vision_cfg.get("change_detection") or {})
+                        .get("min_cards", 1))
+        if len(boxes) < min_cards:
+            print(f"[vision] {len(boxes)} card rect(s) found ({mode}); "
+                  f"not a pick screen.", flush=True)
+            return None
+
+        ids = self.identifier.identify(crop_cards(frame, boxes),
+                                       banner_fn=name_banner)
+
+        names, flagged, unknown = [], [], []
+        for ident in ids:
+            if ident.name and ident.name in self.cards:
+                names.append(ident.name)
+            else:
+                unknown.append(ident.slot)
+                if ident.raw_name:
+                    flagged.append(ident.raw_name)
+
+        if not names:
+            print("[vision] no card names survived validation; skipping.", flush=True)
+            return None
+        if unknown:
+            print(f"[vision] {len(unknown)} unread slot(s): {unknown} "
+                  f"{flagged}", flush=True)
+
+        pack_no, pick_no = self.counter.observe(len(boxes))
+
+        # Pool comes from the running draft state the caller owns; we only know
+        # names, so map them back to card records for color weighting.
+        pool = [self.cards[n] for n in self._pool_names() if n in self.cards]
+        ranking = rank_pack([self.cards[n] for n in names], pool,
+                            self.ratings, self.picker_cfg)
+
+        vp = VisionPack(
+            set_code=self.set_code,
+            pack_number=pack_no,
+            pick_number=pick_no,
+            card_names=[s.name for s in ranking],   # best first
+            flagged=flagged,
+            picked_so_far=[],
+            notes=f"detect={mode}, {len(boxes)} rect(s)",
+            ranking=[s.as_dict() for s in ranking],
+            unknown_slots=unknown,
+        )
+
+        key = (pack_no, pick_no, tuple(sorted(names)))
+        if key in self._seen:
+            print("[vision] same pack/pick already processed; no repeat take.",
+                  flush=True)
+            return None
+        self._seen.add(key)
+
+        self.on_pack(vp)
+        return vp
+
+    def _pool_names(self) -> list:
+        """Names picked so far. Set by the owner via `set_pool`."""
+        return getattr(self, "_pool", [])
+
+    def set_pool(self, names: list) -> None:
+        """Keep the pipeline's view of the pool in step with DraftState."""
+        self._pool = list(names)
 
     def process_result(self, result: VisionResult) -> Optional[VisionPack]:
         """Validation + event flow for an already-extracted result (dry-run/tests)."""

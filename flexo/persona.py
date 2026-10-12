@@ -105,16 +105,40 @@ _DATA_NOTES = {
 
 
 def pick_user_prompt(set_code, pack_no, pick_no, pack_lines, pool_summary,
-                     plan_summary, data_confidence: str = "ok"):
-    """Assemble the user turn for a pick request. `pack_lines` already carries stats."""
+                     plan_summary, data_confidence: str = "ok",
+                     ranked: bool = False):
+    """Assemble the user turn for a pick request. `pack_lines` already carries stats.
+
+    `ranked` says the pack arrives pre-sorted by the deterministic picker, with
+    verbatim rules text attached. That changes the job from "rank this pack" to
+    "back this ranking or argue with it", and it hard-bans reciting an ability
+    from memory — the single thing that makes Flexo sound confidently wrong.
+    """
     note = _DATA_NOTES.get(data_confidence, "")
+    if ranked:
+        header = ("Cards in this pack, ALREADY RANKED by the numbers "
+                  "(17Lands win rates, ALSA, and color fit against your pool):")
+        task = (
+            "The ranking above is the data's answer. Usually you agree with #1 "
+            "and say why. Disagree only when you have a concrete reason the "
+            "numbers miss — curve, removal count, a synergy in your pool — and "
+            "say what that reason is. Name up to two backups.\n"
+            "HARD RULE: only describe what a card does using the rules text "
+            "given above. If a card has no rules text listed, do not claim to "
+            "know what it does. Choose card names exactly as written above."
+        )
+    else:
+        header = ("Cards in this pack (17Lands GIH/OH win rates and ALSA "
+                  "where known):")
+        task = ("Pick the best card for this plan and pool. Name up to two "
+                "backups. Choose card names exactly as written above.")
+
     return (
         f"Set: {set_code}. Pack {pack_no}, Pick {pick_no}.\n\n"
         f"Your declared plan: {plan_summary}\n\n"
-        f"Cards in this pack (17Lands GIH/OH win rates and ALSA where known):\n"
+        f"{header}\n"
         + "\n".join(pack_lines)
         + f"\n\nYour pool so far: {pool_summary}\n\n"
         + (note + "\n\n" if note else "")
-        + "Pick the best card for this plan and pool. Name up to two backups. "
-        "Choose card names exactly as written above."
+        + task
     )

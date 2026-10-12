@@ -24,3 +24,9 @@ pynput==1.7.7
 # Vision input layer (v2): screen capture + image downscale for the vision API
 mss==10.2.0
 Pillow==12.2.0
+
+# Per-card reading (v2.1): find the card rectangles, debounce pack changes,
+# and snap vision reads to the set list.
+opencv-python==5.0.0.93    # contour detection of card frames (detect.py)
+imagehash==4.3.2           # phash pack-change detector (capture.py)
+rapidfuzz==3.14.6          # fuzzy name matching (set_cards.py)

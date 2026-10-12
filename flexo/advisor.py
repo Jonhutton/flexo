@@ -27,22 +27,37 @@ class Advisor:
         self.client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
 
     # ------------------------------------------------------------------ picks
-    def recommend(self, set_code, pack_no, pick_no, pack_names, state: DraftState) -> Recommendation:
+    def recommend(self, set_code, pack_no, pick_no, pack_names, state: DraftState,
+                  ranking=None, cards=None) -> Recommendation:
+        """Ask Flexo for a pick.
+
+        `ranking` (picker.ScoredCard list) and `cards` (name -> Scryfall record)
+        are optional. When supplied, the pack is presented already ranked by the
+        deterministic picker and the top candidates carry their verbatim oracle
+        text — so the model is narrating and sanity-checking a ranking rather
+        than inventing one, and it has no reason to recite an ability from
+        memory. Without them this falls back to the plain stat lines.
+        """
         self.seventeen.ensure_set(set_code)
 
-        # Build "Card — GIH x% | OH y% | ALSA z" lines; the model picks names,
-        # we own the numbers.
         wr_by_name = {}
-        pack_lines = []
         for name in pack_names:
             stats = self.seventeen.stats_for(name)
             wr_by_name[name] = stats.get("gih_wr") if stats else None
-            pack_lines.append(stat_line(name, stats))
+
+        if ranking:
+            pack_lines = self._ranked_lines(ranking, cards or {})
+        else:
+            # Build "Card — GIH x% | OH y% | ALSA z" lines; the model picks
+            # names, we own the numbers.
+            pack_lines = [stat_line(n, self.seventeen.stats_for(n))
+                          for n in pack_names]
 
         user = persona.pick_user_prompt(
             set_code, pack_no, pick_no, pack_lines,
             state.pool_summary(), state.plan_summary(),
             data_confidence=self.seventeen.data_confidence(),
+            ranked=bool(ranking),
         )
         data = self._call(persona.pick_system(), user, persona.PICK_SCHEMA)
 
@@ -61,6 +76,39 @@ class Advisor:
             confidence=data.get("confidence", "medium"),
             spoken=data.get("spoken", "").strip(),
         )
+
+    # Oracle text is only included for the cards Flexo might actually discuss;
+    # the tail of a 14-card pack just needs a name and a number.
+    ORACLE_DEPTH = 5
+
+    def _ranked_lines(self, ranking, cards: dict) -> list:
+        """Present the pack in picker order, with rules text for the top few.
+
+        Never truncate oracle text: a clipped ability is exactly how Flexo
+        would end up confidently describing a card wrong, which is the failure
+        this whole path exists to prevent.
+        """
+        lines = []
+        for i, s in enumerate(ranking, start=1):
+            card = cards.get(s.name, {})
+            stats = self.seventeen.stats_for(s.name)
+            head = f"{i}. {s.name}"
+            if card.get("mana_cost"):
+                head += f" {card['mana_cost']}"
+            if card.get("type_line"):
+                head += f" — {card['type_line']}"
+            if card.get("rarity"):
+                head += f" [{card['rarity']}]"
+
+            bits = [stat_line(s.name, stats).lstrip("- ").split("—", 1)[-1].strip()]
+            bits.append(f"picker {s.score:.3f}: {'; '.join(s.reasons)}")
+            line = f"- {head} — " + " | ".join(b for b in bits if b)
+
+            if i <= self.ORACLE_DEPTH and card.get("oracle_text"):
+                oracle = card["oracle_text"].replace("\n", " / ")
+                line += f"\n    rules text: {oracle}"
+            lines.append(line)
+        return lines
 
     # ------------------------------------------------------------------ banter
     def respond(self, text: str, state: DraftState,

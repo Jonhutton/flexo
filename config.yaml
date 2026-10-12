@@ -32,19 +32,68 @@ vision:
   max_tokens: 4000         # covers thinking + the JSON card list
   # THE one config change per set release: the current Quick Draft set code.
   # Used for the Scryfall card list (validation) and 17Lands ratings.
-  set_code: "ECL"
+  set_code: "FRA"          # Reality Fracture (released 2026-10-02)
   match_threshold: 0.82    # fuzzy-match ratio below which a card name is
                            # FLAGGED instead of auto-corrected
+  recheck_threshold: 0.60  # between this and match_threshold, the read is kept
+                           # as a best guess and that slot gets ONE retry with a
+                           # tight title-bar crop. Below it: flagged, never guessed.
   max_image_long_edge: 2048  # downscale screenshots to this before the API
   jpeg_quality: 85
   captures_dir: "captures"   # per-session screenshot folders (debug/replay)
   log_cross_check: true    # also tail Player.log for pick events + draft end
 
+  # How Flexo reads a pack:
+  #   crops   detect each card rectangle and read them one at a time (accurate;
+  #           a card name is only ~9px tall in a full 1080p frame)
+  #   screen  send the whole screenshot in one call (cheaper, less accurate)
+  read_mode: "crops"
+  upscale_min_width: 420   # crops narrower than this are Lanczos-upscaled
+                           # before sending. Raise to ~600 if slots keep coming
+                           # back as 'recheck' at 1080p.
+  # Restrict change detection + card search to the pack area, as [x, y, w, h]
+  # fractions of the frame. null = whole frame. Set this from calibrate output
+  # so hovering the sidebar doesn't read as a new pack.
+  pack_region: null
+
+  detection:
+    mode: "auto"             # auto = find card rectangles; grid = fixed layout
+    min_area_frac: 0.0035    # min card area as a fraction of the frame
+    max_area_frac: 0.06
+    aspect_range: [0.60, 0.85]   # card width/height; MTG cards are ~0.716
+    grid:                    # used when mode == grid, or if auto finds nothing
+      region: [0.08, 0.14, 0.84, 0.72]
+      rows: 2
+      cols: 7
+
+  change_detection:
+    hash_distance: 6         # phash hamming distance that counts as "changed"
+    stable_samples: 3        # consecutive steady samples before a new pack
+                             # commits — waits out the deal animation
+    min_cards: 1             # ignore frames with fewer detected cards (menus)
+
+# How the pack gets ranked. Pure data, no model call — the persona layer only
+# narrates the result. See flexo/picker.py for what each knob does.
+picker:
+  color_weight: 0.16         # full-commitment swing between a perfect color fit
+                             # and a total misfit. Has to be able to outweigh a
+                             # real win-rate gap or commitment never changes a pick.
+  commit_start: 3            # pool size where color commitment starts to bite
+  commit_full: 18            # pool size where it reaches full strength
+  gold_early_penalty: 0.004  # multicolor card taken while still open
+  third_color_penalty: 0.03  # card dragging in a THIRD color once committed
+
 seventeen_lands:
-  # Which 17Lands dataset to pull stats from. The set code is detected
-  # automatically from the Arena log's EventName (e.g. QuickDraft_SOS_... -> SOS).
+  # Which 17Lands dataset to pull stats from. The set code comes from
+  # vision.set_code (or the Arena log's EventName in legacy log mode).
   format: "QuickDraft"     # QuickDraft | PremierDraft | TradDraft
   cache_hours: 12          # re-fetch a set's ratings at most this often
+  # A downloaded CSV export beats the API, which returns null win rates to
+  # script callers. Leave null to auto-discover: any `card-ratings*.csv` in the
+  # data dir or repo root is used, newest first, and rejected with a warning if
+  # its card names don't match the set. Point this at a file to pin one.
+  #   17lands.com -> Card Ratings -> pick set + format -> download
+  csv_path: null
 
 tts:
   # provider is chosen automatically at runtime:

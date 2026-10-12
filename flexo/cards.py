@@ -11,8 +11,64 @@ from pathlib import Path
 SCRYFALL_BULK_INDEX = "https://api.scryfall.com/bulk-data"
 
 
+ARENA_DB_GLOBS = [
+    r"C:/Program Files/Wizards of the Coast/MTGA/MTGA_Data/Downloads/Raw/Raw_CardDatabase_*.mtga",
+    r"C:/Program Files (x86)/Steam/steamapps/common/MTGA/MTGA_Data/Downloads/Raw/Raw_CardDatabase_*.mtga",
+    r"C:/Program Files/Epic Games/MagicTheGathering/MTGA_Data/Downloads/Raw/Raw_CardDatabase_*.mtga",
+]
+
+
+def arena_db_names() -> dict:
+    """grpId -> English name from Arena's own local card database (SQLite).
+
+    Scryfall lags days-to-weeks on arena_id for a new set (FRA had none at launch),
+    but Arena ships every grpId it can put in a pack. Names come from TitleId, which
+    is the front face for DFC/split cards -- the same convention 17Lands uses.
+    Returns {} if Arena isn't installed where we look; never raises.
+    """
+    import glob
+    import re
+    import sqlite3
+
+    paths = [p for g in ARENA_DB_GLOBS for p in glob.glob(g)]
+    if not paths:
+        return {}
+    db = max(paths, key=lambda p: Path(p).stat().st_mtime)  # newest if several
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        rows = con.execute(
+            "SELECT c.GrpId, l.Loc FROM Cards c JOIN Localizations_enUS l "
+            "ON l.LocId = c.TitleId ORDER BY l.Formatted = 1"  # Formatted=1 rows last -> win
+        ).fetchall()
+        con.close()
+    except Exception as e:
+        print(f"[cards] Arena card DB unreadable ({e}); using Scryfall map only", flush=True)
+        return {}
+    out = {}
+    for gid, name in rows:
+        name = re.sub(r"<[^>]*>", "", name or "").strip()  # Arena markup: <nobr>, <sprite ...>
+        if name:
+            out[str(gid)] = name
+    return out
+
+
 def build_card_map(cache_path: Path) -> dict:
-    """Load arena_id -> card name. Use cache if present, else fetch from Scryfall once."""
+    """Load arena_id -> card name: Scryfall cache, gaps filled from Arena's local DB."""
+    card_map = _scryfall_map(cache_path)
+    local = arena_db_names()
+    # Fill gaps only: Scryfall names are canonical ("Front // Back"), Arena's are front-face.
+    added = 0
+    for k, name in local.items():
+        if k not in card_map:
+            card_map[k] = name
+            added += 1
+    if added:
+        print(f"[cards] +{added:,} card ids from Arena's local database", flush=True)
+    return card_map
+
+
+def _scryfall_map(cache_path: Path) -> dict:
+    """arena_id -> card name. Use cache if present, else fetch from Scryfall once."""
     if cache_path.exists():
         try:
             return json.loads(cache_path.read_text(encoding="utf-8"))

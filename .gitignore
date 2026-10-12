@@ -27,3 +27,10 @@ outputs/
 .DS_Store
 Thumbs.db
 .vscode/
+
+# Debug artifacts from calibrate.py / --dry-run
+debug/
+captures/
+
+# Source drops already merged into flexo/
+*.zip

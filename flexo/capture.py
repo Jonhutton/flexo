@@ -39,6 +39,10 @@ class Capture:
     width: int                # downscaled dimensions actually sent
     height: int
     taken_at: float           # time.time() at grab
+    # Full-resolution pixels, kept in memory for the per-card crops path.
+    # Card names are small enough that JPEG ringing at quality 85 genuinely
+    # costs reads, so cropping works from this rather than from jpeg_bytes.
+    image: Optional[Image.Image] = None
 
 
 # --------------------------------------------------------------------------- win32
@@ -135,7 +139,7 @@ class ScreenCapture:
 
         jpeg, w, h = encode_for_vision(img, self.max_long_edge, self.jpeg_quality)
         return Capture(png_path=png_path, jpeg_bytes=jpeg, media_type="image/jpeg",
-                       width=w, height=h, taken_at=time.time())
+                       width=w, height=h, taken_at=time.time(), image=img)
 
 
 def encode_for_vision(img: Image.Image, max_long_edge: int = 2048,
@@ -149,6 +153,58 @@ def encode_for_vision(img: Image.Image, max_long_edge: int = 2048,
     buf = io.BytesIO()
     img.convert("RGB").save(buf, "JPEG", quality=jpeg_quality)
     return buf.getvalue(), img.width, img.height
+
+
+class ChangeDetector:
+    """Debounced perceptual-hash change detector for auto trigger mode.
+
+    Why a perceptual hash instead of the mean pixel diff below: Arena never
+    holds still. Cards glow, particles drift, the mouse hovers. A phash of a
+    downscaled frame ignores that noise but flips hard when a new pack is
+    dealt, which is the only event we actually want to fire on.
+
+    `stable_samples` is the debounce — the new screen has to hold steady for
+    several polls before it commits, so we never screenshot cards mid-flip
+    while the deal animation is still running.
+
+    update(img) returns True exactly once per new stable state.
+    """
+
+    def __init__(self, hash_distance: int = 6, stable_samples: int = 3):
+        self.hash_distance = hash_distance
+        self.stable_samples = stable_samples
+        self._committed = None
+        self._candidate = None
+        self._stable_count = 0
+
+    @staticmethod
+    def _hash(img: Image.Image):
+        import imagehash
+        return imagehash.phash(img.convert("L").resize((256, 256)), hash_size=16)
+
+    def update(self, img: Image.Image) -> bool:
+        h = self._hash(img)
+
+        if self._committed is not None and (h - self._committed) <= self.hash_distance:
+            # Back at (or never left) the committed screen; drop any candidate.
+            self._candidate, self._stable_count = None, 0
+            return False
+
+        if self._candidate is not None and (h - self._candidate) <= self.hash_distance:
+            self._stable_count += 1
+        else:
+            self._candidate, self._stable_count = h, 1
+
+        if self._stable_count >= self.stable_samples:
+            self._committed = self._candidate
+            self._candidate, self._stable_count = None, 0
+            return True
+        return False
+
+    def force_commit(self, img: Image.Image) -> None:
+        """Treat the current screen as already seen (e.g. after a manual trigger)."""
+        self._committed = self._hash(img)
+        self._candidate, self._stable_count = None, 0
 
 
 def thumb_diff(a: Optional[bytes], b: Optional[bytes]) -> float:

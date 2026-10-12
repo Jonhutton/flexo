@@ -50,6 +50,16 @@ from flexo.web import OverlayServer
 
 ROOT = Path(__file__).resolve().parent
 
+# Card names and Scryfall rules text carry characters the Windows console
+# codepage can't encode (planeswalker "−", em dashes, "Æ"). A bare print of one
+# raises UnicodeEncodeError, and a crash mid-draft costs a whole recording —
+# so degrade those characters instead of dying on them.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 
 # --------------------------------------------------------------------------- app
 class Flexo:
@@ -187,8 +197,13 @@ class Flexo:
 
     # ------------------------------------------------------------------ event handling
     def _handle_pack(self, set_code: str, pack_no: int, pick_no: int,
-                     pack_names: list[str]) -> None:
-        """A new pack to advise on — shared by the log parser and vision paths."""
+                     pack_names: list[str], ranking=None) -> None:
+        """A new pack to advise on — shared by the log parser and vision paths.
+
+        `ranking` is the picker's deterministic order (crops path only). When
+        present it rides along to the advisor as evidence, so Flexo narrates a
+        ranking instead of building one from card names alone.
+        """
         self.state.set_code = set_code
         self.state.current_pack = pack_names
         self._pick_open = True
@@ -204,15 +219,18 @@ class Flexo:
         # Kick the Claude call off immediately, off the event loop, so a slow
         # call (or in-progress TTS) never delays seeing the next event.
         threading.Thread(target=self._recommend_async,
-                         args=(set_code, pack_no, pick_no, pack_names, gen),
+                         args=(set_code, pack_no, pick_no, pack_names, gen,
+                               ranking),
                          daemon=True).start()
 
     def _recommend_async(self, set_code: str, pack_no: int, pick_no: int,
-                         pack_names: list[str], gen: int) -> None:
+                         pack_names: list[str], gen: int, ranking=None) -> None:
         t0 = time.perf_counter()
         try:
             reco = self.advisor.recommend(
-                set_code, pack_no, pick_no, pack_names, self.state
+                set_code, pack_no, pick_no, pack_names, self.state,
+                ranking=ranking,
+                cards=getattr(self.vision, "cards", None) if self.vision else None,
             )
         except Exception as e:
             print(f"[advisor] recommend failed: {e}", flush=True)
@@ -280,8 +298,12 @@ class Flexo:
         # more than we do (e.g. Flexo started mid-draft).
         if len(vp.picked_so_far) > len(self.state.pool):
             self.state.pool = list(vp.picked_so_far)
+        # Keep the pipeline's pool view in step so the next pack's color
+        # weighting reflects what has actually been taken.
+        if self.vision is not None:
+            self.vision.set_pool(self.state.pool)
         self._handle_pack(vp.set_code, vp.pack_number, vp.pick_number,
-                          vp.card_names)
+                          vp.card_names, ranking=getattr(vp, "ranking", None))
 
     def _on_vision_pick(self, name: str) -> None:
         self._record_pick([name], source="vision")
@@ -291,8 +313,9 @@ class Flexo:
         message if the set list can't be fetched — vision is the input layer,
         so starting blind would be worse than failing loudly."""
         from flexo.capture import ScreenCapture
-        from flexo.set_cards import CardValidator
-        from flexo.vision import VisionExtractor
+        from flexo.picker import PickerConfig
+        from flexo.set_cards import CardValidator, supplement_from_names
+        from flexo.vision import CardIdentifier, VisionExtractor
         from flexo.vision_pipeline import VisionPipeline
 
         vcfg = self.cfg["vision"]
@@ -300,14 +323,43 @@ class Flexo:
         if not set_code:
             raise SystemExit("[vision] set vision.set_code in config.yaml "
                              "(e.g. the current Quick Draft set).")
-        validator = CardValidator(set_code, ROOT / self.cfg["paths"]["data_dir"],
-                                  threshold=vcfg.get("match_threshold", 0.82))
+        data_dir = ROOT / self.cfg["paths"]["data_dir"]
         capture = ScreenCapture(ROOT / vcfg.get("captures_dir", "captures"),
                                 max_long_edge=vcfg.get("max_image_long_edge", 2048),
                                 jpeg_quality=vcfg.get("jpeg_quality", 85))
         extractor = VisionExtractor(model=vcfg["model"],
                                     max_tokens=vcfg.get("max_tokens", 4000),
                                     effort=vcfg.get("effort"))
+
+        identifier = cards = ratings = picker_cfg = None
+        if (vcfg.get("read_mode") or "screen") == "crops":
+            # Ratings first: the 17Lands name list is what tells us which cards
+            # are actually draftable, including bonus-sheet cards that live
+            # under a different Scryfall set code.
+            self.seventeen.ensure_set(set_code)
+            ratings = self.seventeen._by_name
+            cards = supplement_from_names(set_code, data_dir, list(ratings))
+            picker_cfg = PickerConfig.from_cfg(self.cfg)
+
+        # Built after the supplement so the candidate list includes bonus-sheet
+        # cards — a name the validator has never heard of can never be matched.
+        validator = CardValidator(
+            set_code, data_dir,
+            threshold=vcfg.get("match_threshold", 0.82),
+            recheck_threshold=vcfg.get("recheck_threshold", 0.60))
+
+        if cards is not None:
+            identifier = CardIdentifier(
+                validator,
+                model=vcfg["model"],
+                max_tokens=vcfg.get("max_tokens", 4000),
+                effort=vcfg.get("effort"),
+                upscale_min_width=vcfg.get("upscale_min_width", 420))
+            print(f"[vision] crops mode: {len(cards)} cards, "
+                  f"{len(validator.names)} candidate names, "
+                  f"17Lands confidence '{self.seventeen.data_confidence()}'.",
+                  flush=True)
+
         return VisionPipeline(
             set_code=set_code,
             capture=capture,
@@ -320,6 +372,11 @@ class Flexo:
             auto_poll_seconds=vcfg.get("auto_poll_seconds", 2.0),
             auto_cooldown_seconds=vcfg.get("auto_cooldown_seconds", 8.0),
             timings=self.timings,
+            identifier=identifier,
+            vision_cfg=vcfg,
+            cards=cards,
+            ratings=ratings,
+            picker_cfg=picker_cfg,
         )
 
     def _tail_log_crosscheck(self, log_path: Path) -> None:
@@ -387,6 +444,106 @@ class Flexo:
 
 
 # --------------------------------------------------------------------------- dry run
+def run_dry_run_crops(cfg: dict, image_path: str) -> None:
+    """One saved screenshot through the per-card pipeline, console only.
+
+    detect rectangles -> read each name -> validate -> rank -> Flexo's take.
+    This is the path a live pack takes, so a screenshot that works here works
+    on camera. Prints per-slot evidence, because when a read goes wrong the
+    question is always *which* slot and *what did it see*.
+    """
+    from PIL import Image
+
+    from flexo.detect import (crop_cards, crop_fraction, draw_boxes,
+                              find_cards, name_banner)
+    from flexo.picker import PickerConfig, rank_pack
+    from flexo.set_cards import CardValidator, supplement_from_names
+    from flexo.vision import CardIdentifier
+
+    vcfg = cfg["vision"]
+    set_code = vcfg["set_code"]
+    if not set_code:
+        raise SystemExit("[dry-run] set vision.set_code in config.yaml first.")
+    data_dir = ROOT / cfg["paths"]["data_dir"]
+
+    print(f"=== DRY RUN (crops): {image_path} (set {set_code}) ===\n", flush=True)
+
+    # 1. Data backbone
+    seventeen = SeventeenLands(data_dir=data_dir,
+                               fmt=cfg["seventeen_lands"]["format"],
+                               cache_hours=cfg["seventeen_lands"]["cache_hours"],
+                               csv_path=cfg["seventeen_lands"].get("csv_path"))
+    seventeen.ensure_set(set_code)
+    ratings = seventeen._by_name
+    card_pool = supplement_from_names(set_code, data_dir, list(ratings))
+    print(f"[1. data]    {len(card_pool)} cards, "
+          f"17Lands confidence '{seventeen.data_confidence()}'", flush=True)
+
+    # 2. Detection
+    img = Image.open(image_path).convert("RGB")
+    frame = crop_fraction(img, vcfg.get("pack_region"))
+    boxes, mode = find_cards(frame, vcfg)
+    print(f"[2. detect]  {len(boxes)} card rect(s) via {mode} "
+          f"({frame.width}x{frame.height})", flush=True)
+    if not boxes:
+        raise SystemExit("[dry-run] no cards detected. Run "
+                         "scripts/calibrate.py on this image to see why.")
+
+    # 3. Identification
+    validator = CardValidator(set_code, data_dir,
+                              threshold=vcfg.get("match_threshold", 0.82),
+                              recheck_threshold=vcfg.get("recheck_threshold", 0.60))
+    identifier = CardIdentifier(validator, model=vcfg["model"],
+                                max_tokens=vcfg.get("max_tokens", 4000),
+                                effort=vcfg.get("effort"),
+                                upscale_min_width=vcfg.get("upscale_min_width", 420))
+    crops = crop_cards(frame, boxes)
+    ids = identifier.identify(crops, banner_fn=name_banner)
+
+    print("\n[3. identify]", flush=True)
+    names = []
+    for x in ids:
+        mark = {"ok": "  ", "recheck": "~ ", "unknown": "! "}.get(x.status, "? ")
+        print(f"  {mark}slot {x.slot:>2}  read={x.raw_name!r:<34} "
+              f"-> {x.name or '(unmatched)':<34} "
+              f"match={x.score:.2f} conf={x.confidence:.2f}", flush=True)
+        if x.name and x.name in card_pool:
+            names.append(x.name)
+    unread = len(ids) - len(names)
+    print(f"  {len(names)}/{len(ids)} slots identified"
+          + (f"  ({unread} unread)" if unread else ""), flush=True)
+    if not names:
+        raise SystemExit("[dry-run] nothing identified; check debug/crops/.")
+
+    # 4. Ranking
+    ranking = rank_pack([card_pool[n] for n in names], [], ratings,
+                        PickerConfig.from_cfg(cfg))
+    print("\n[4. rank] (empty pool — pick 1 conditions)", flush=True)
+    for i, s in enumerate(ranking[:5], 1):
+        print(f"  {i}. {s.name:<34} {s.score:.4f}  {'; '.join(s.reasons)}",
+              flush=True)
+
+    # 5. Debug image
+    debug_dir = ROOT / "debug"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    out = debug_dir / "dryrun_pack.png"
+    draw_boxes(frame, boxes, [x.name or "?" for x in ids]).save(out)
+    print(f"\nwrote {out} (names drawn on the boxes)", flush=True)
+
+    # 6. Flexo's take
+    state = DraftState(set_code=set_code)
+    state.current_pack = [s.name for s in ranking]
+    advisor = Advisor(model=cfg["claude"]["model"], seventeen=seventeen,
+                      max_tokens=cfg["claude"]["max_tokens"])
+    reco = advisor.recommend(set_code, 1, 1, [s.name for s in ranking], state,
+                             ranking=ranking, cards=card_pool)
+    print(f"\n[5. Flexo {reco.confidence}] {reco.spoken}", flush=True)
+    for p in reco.picks:
+        wr = p.get("gih_wr")
+        print(f"     - {p['name']} ({'--' if wr is None else f'{wr*100:.1f}%'}): "
+              f"{p['reason']}", flush=True)
+
+
 def run_dry_run(cfg: dict, image_path: str) -> None:
     """One saved screenshot through the whole vision pipeline, console only:
     vision -> JSON -> validation -> ratings -> Flexo's take. No TTS, no overlay,
@@ -397,6 +554,11 @@ def run_dry_run(cfg: dict, image_path: str) -> None:
     from flexo.vision import VisionExtractor
 
     vcfg = cfg["vision"]
+    # vision.read_mode picks the path, so --dry-run always exercises whichever
+    # one the live run would use.
+    if (vcfg.get("read_mode") or "screen") == "crops":
+        return run_dry_run_crops(cfg, image_path)
+
     set_code = vcfg["set_code"]
     if not set_code:
         raise SystemExit("[dry-run] set vision.set_code in config.yaml first.")
