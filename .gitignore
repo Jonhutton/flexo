@@ -34,3 +34,6 @@ captures/
 
 # Source drops already merged into flexo/
 *.zip
+
+# Local Arena screenshots used by tests/test_detect.py (too big to commit)
+Screenshots */

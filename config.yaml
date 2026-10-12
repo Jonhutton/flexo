@@ -57,7 +57,17 @@ vision:
   pack_region: null
 
   detection:
-    mode: "auto"             # auto = find card rectangles; grid = fixed layout
+    mode: "slots"            # slots = Arena's fixed 5-wide pick lattice (default,
+                             # tuned on real captures); auto = contour search;
+                             # grid = evenly sliced region
+    slots:                   # fractions of the FULL frame - keep pack_region null
+      # [x0, y0, card_w, card_h, pitch_x, pitch_y], measured 2026-10-12 from
+      # 1918x1198 windowed Arena. Rerun scripts/calibrate.py if you change
+      # resolution/window size; it prints a fitted lattice.
+      lattice: [0.1058, 0.1711, 0.1012, 0.2304, 0.1135, 0.2483]
+      cols: 5
+      rows: 3
+      min_title_brightness: 80   # cards >=114, empty table <=42 on real captures
     min_area_frac: 0.0035    # min card area as a fraction of the frame
     max_area_frac: 0.06
     aspect_range: [0.60, 0.85]   # card width/height; MTG cards are ~0.716

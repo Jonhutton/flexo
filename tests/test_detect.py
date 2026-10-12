@@ -17,8 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PIL import Image, ImageDraw
 
 from flexo.capture import ChangeDetector
-from flexo.detect import (crop_cards, crop_fraction, find_cards, find_cards_auto,
-                          grid_boxes, name_banner)
+from flexo.detect import (DEFAULT_SLOTS, crop_cards, crop_fraction, find_cards,
+                          find_cards_auto, grid_boxes, name_banner, slot_boxes)
 
 W, H = 1920, 1080
 CARD_W, CARD_H = 150, 209          # ~0.718 aspect, close to a real card
@@ -73,12 +73,70 @@ def test_grid_fallback_shape():
     assert all(b.w > 0 and b.h > 0 for b in boxes)
 
 
-def test_find_cards_falls_back_to_grid():
-    """An empty screen finds no contours and must still return a usable layout."""
+def test_empty_screen_finds_nothing():
+    """A screen with no cards must come back empty, never as a guessed grid:
+    phantom slots would send blank crops to the model on camera."""
     blank = Image.new("RGB", (W, H), (18, 20, 24))
-    boxes, mode = find_cards(blank, {"detection": {"mode": "auto",
-                                                   "grid": {"rows": 2, "cols": 7}}})
-    assert mode == "grid" and len(boxes) == 14
+    for mode in ("slots", "auto"):
+        boxes, used = find_cards(blank, {"detection": {"mode": mode}})
+        assert boxes == [] and used == mode, (mode, used, len(boxes))
+
+
+# --- slots mode: Arena's fixed lattice -------------------------------------
+LATTICE = DEFAULT_SLOTS["lattice"]
+
+
+def make_arena(n_cards: int, frame_rgb=(235, 235, 235), zoom: bool = False) -> Image.Image:
+    """Cards on the slot lattice, dark table, bright name bars - including
+    pale/white frames, which is what contour detection missed on real pixels."""
+    img = Image.new("RGB", (1918, 1198), (40, 22, 18))
+    d = ImageDraw.Draw(img)
+    for b in slot_boxes(img, LATTICE, 5, 3)[:n_cards]:
+        d.rectangle([b.x, b.y, b.x + b.w, b.y + b.h], fill=frame_rgb)
+        d.rectangle([b.x + 6, b.y + 6, b.x + b.w - 6, b.y + int(0.1 * b.h)],
+                    fill=(200, 200, 190))
+    if zoom:
+        d.rectangle([641, 93, 641 + 488, 93 + 697], fill=(230, 225, 210),
+                    outline=(10, 10, 10), width=6)
+    return img
+
+
+def test_slots_count_every_pack_size():
+    for n in (14, 13, 9, 5, 4, 2, 1):
+        boxes, mode = find_cards(make_arena(n), {"detection": {"mode": "slots"}})
+        assert mode == "slots" and len(boxes) == n, (n, len(boxes))
+
+
+def test_slots_reading_order():
+    boxes, _ = find_cards(make_arena(7), {})          # slots is the default
+    assert [b.y for b in boxes[:5]] == [boxes[0].y] * 5
+    assert all(a.x < b.x for a, b in zip(boxes[:5], boxes[1:5]))
+    assert boxes[5].y > boxes[0].y and boxes[5].x == boxes[0].x
+
+
+def test_hover_zoom_is_occluded():
+    boxes, mode = find_cards(make_arena(14, zoom=True), {})
+    assert mode == "occluded" and boxes == []
+
+
+REAL = Path(__file__).resolve().parents[1] / "Screenshots 101226"
+REAL_TRUTH = {"114548": 14, "114710": "occluded", "115016": 9,
+              "120021": 4, "120120": 2, "120149": 0}
+
+
+def test_real_arena_screenshots():
+    """The 2026-10-12 Quick Draft captures (local only, not committed)."""
+    shots = sorted(REAL.glob("*.png")) if REAL.exists() else []
+    if not shots:
+        print("  (real screenshots not present; skipped)")
+        return
+    for f in shots:
+        want = REAL_TRUTH.get(f.stem[-6:])
+        if want is None:
+            continue
+        boxes, mode = find_cards(Image.open(f).convert("RGB"), {})
+        got = "occluded" if mode == "occluded" else len(boxes)
+        assert got == want, (f.name, got, want)
 
 
 def test_crop_fraction():
@@ -118,7 +176,11 @@ if __name__ == "__main__":
     test_reading_order_is_stable()
     test_crops_match_boxes()
     test_grid_fallback_shape()
-    test_find_cards_falls_back_to_grid()
+    test_empty_screen_finds_nothing()
+    test_slots_count_every_pack_size()
+    test_slots_reading_order()
+    test_hover_zoom_is_occluded()
+    test_real_arena_screenshots()
     test_crop_fraction()
     test_change_detector_debounces()
     test_change_detector_ignores_flicker()

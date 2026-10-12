@@ -224,6 +224,10 @@ class VisionPipeline:
         boxes, mode = find_cards(frame, self.vision_cfg)
         min_cards = int((self.vision_cfg.get("change_detection") or {})
                         .get("min_cards", 1))
+        if mode == "occluded":
+            print("[vision] a hovered card is zoomed over the pack - move the "
+                  "mouse off the cards (hotkey mode: press it again).", flush=True)
+            return None
         if len(boxes) < min_cards:
             print(f"[vision] {len(boxes)} card rect(s) found ({mode}); "
                   f"not a pick screen.", flush=True)

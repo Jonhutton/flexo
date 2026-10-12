@@ -10,6 +10,7 @@ is looked up locally from 17Lands, never taken from the model.
 """
 
 import json
+import re
 from typing import Optional
 
 import anthropic
@@ -69,12 +70,19 @@ class Advisor:
                 "reason": p.get("reason", ""),
                 "gih_wr": wr_by_name.get(name),   # attach our local number
             })
+        spoken = data.get("spoken", "").strip()
+        top = picks[0] if picks else {}
+        spoken = guard_percentages(
+            spoken, allowed=percents_in(user),
+            top_wr=top.get("gih_wr"),
+            other_names=[n for n in pack_names if n != top.get("name")],
+        )
         return Recommendation(
             pack_number=pack_no,
             pick_number=pick_no,
             picks=picks,
             confidence=data.get("confidence", "medium"),
-            spoken=data.get("spoken", "").strip(),
+            spoken=spoken,
         )
 
     # Oracle text is only included for the cards Flexo might actually discuss;
@@ -167,3 +175,81 @@ class Advisor:
             # Never let a model/network hiccup kill the live loop.
             print(f"[advisor] Claude call failed: {e}", flush=True)
             return {}
+
+
+# ---------------------------------------------------------------------- stat guard
+# The prompt says "never invent a stat", and on real packs (2026-10-12 dry run)
+# Flexo still said "Sixty percent win rate" for a 56.4% card. A wrong number on
+# camera is the one error viewers can check, so the spoken line is policed in
+# code: every percentage must be one we actually handed the model.
+
+_UNITS = {w: i for i, w in enumerate(
+    "zero one two three four five six seven eight nine ten eleven twelve "
+    "thirteen fourteen fifteen sixteen seventeen eighteen nineteen".split())}
+_TENS = {w: 10 * i for i, w in enumerate(
+    "_ _ twenty thirty forty fifty sixty seventy eighty ninety".split()) if w != "_"}
+_NUM_WORD = r"(?:%s)(?:[- ](?:%s))?|(?:%s)" % (
+    "|".join(_TENS), "|".join(w for w in _UNITS if _UNITS[w] < 10),
+    "|".join(_UNITS))
+_PCT = re.compile(
+    r"(?P<num>\d+(?:\.\d+)?|%s)(?:\s+point\s+(?P<frac>\w+))?\s*(?:%%|percent\b|per cent\b)"
+    % _NUM_WORD, re.IGNORECASE)
+
+
+def _word_value(tok: str) -> Optional[float]:
+    tok = tok.lower()
+    try:
+        return float(tok)
+    except ValueError:
+        pass
+    parts = re.split(r"[- ]", tok)
+    total = 0
+    for p in parts:
+        if p in _TENS:
+            total += _TENS[p]
+        elif p in _UNITS:
+            total += _UNITS[p]
+        else:
+            return None
+    return float(total)
+
+
+def percents_in(text: str) -> list:
+    """Every 'NN.N%' figure in the prompt we sent: the only numbers Flexo may say."""
+    return [float(m) for m in re.findall(r"(\d+(?:\.\d+)?)%", text)]
+
+
+def guard_percentages(spoken: str, allowed: list, top_wr: Optional[float] = None,
+                      other_names: Optional[list] = None, tol: float = 1.0) -> str:
+    """Fix or drop any percentage in `spoken` that isn't within `tol` of a real one.
+
+    A bad number in a sentence about the top pick is replaced with the top
+    pick's real GIH WR (rounded, spoken as digits). If the sentence names
+    another card, or there's no real number to use, the sentence is dropped.
+    """
+    if not spoken:
+        return spoken
+
+    def ok(v: float) -> bool:
+        return any(abs(v - a) <= tol for a in allowed)
+
+    others = [n.split(" // ")[0].lower() for n in (other_names or [])]
+    sentences = re.split(r"(?<=[.!?])\s+", spoken)
+    kept = []
+    for sent in sentences:
+        bad = [m for m in _PCT.finditer(sent)
+               if (v := _word_value(m.group("num"))) is not None and not ok(v)]
+        if not bad:
+            kept.append(sent)
+            continue
+        names_other = any(o and o in sent.lower() for o in others)
+        if top_wr is None or names_other:
+            print(f"[advisor] dropped invented stat: {sent!r}", flush=True)
+            continue
+        real = f"{round(top_wr * 100)} percent"
+        fixed = _PCT.sub(
+            lambda m: m.group(0) if ok(_word_value(m.group("num")) or -1.0) else real,
+            sent)
+        print(f"[advisor] corrected invented stat: {sent!r} -> {fixed!r}", flush=True)
+        kept.append(fixed)
+    return " ".join(kept).strip()
