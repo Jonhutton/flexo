@@ -37,3 +37,6 @@ captures/
 
 # Local Arena screenshots used by tests/test_detect.py (too big to commit)
 Screenshots */
+
+# Local YouTube assets (removed from the repo 2026-08-25)
+*Thumbnail*.png
