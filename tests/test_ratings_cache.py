@@ -100,9 +100,31 @@ def test_formatters():
     assert stat_line("Mystery Card", None) == "- Mystery Card — no data"
 
 
+def test_newest_csv_gaps_filled_from_older(tmp: Path):
+    """The newest export wins, but cards it leaves blank (17Lands hides small
+    samples - FRA Quick Draft blanked 85 rares/mythics) take an older export's row."""
+    import os
+    hdr = '"Name","Rarity","# GIH","GIH WR"\n'
+    old = tmp / "card-ratings-2026-10-06 Test.csv"
+    new = tmp / "card-ratings-2026-10-12 Test.csv"
+    old.write_text(hdr + '"Bomb","M","900","62.0%"\n"Filler","C","9000","50.0%"\n',
+                   encoding="utf-8")
+    new.write_text(hdr + '"Bomb","M","40",""\n"Filler","C","1200","52.5%"\n',
+                   encoding="utf-8")
+    os.utime(old, (time.time() - 3600,) * 2)          # older by mtime
+    data = tmp / "data"
+    s = SeventeenLands(data_dir=data, fmt="QuickDraft")
+    s._load_format = lambda *a, **k: {}               # never touch the network
+    assert s.ensure_set("TST")
+    assert s.stats_for("Filler")["gih_wr"] == 0.525   # newest file wins
+    bomb = s.stats_for("Bomb")
+    assert bomb["gih_wr"] == 0.62 and bomb["from_file"] == old.name
+
+
 if __name__ == "__main__":
     tests = [test_cache_hit_no_fetch, test_data_confidence_levels,
-             test_no_data_is_none_confidence, test_stale_cache_refetches]
+             test_no_data_is_none_confidence, test_stale_cache_refetches,
+             test_newest_csv_gaps_filled_from_older]
     for t in tests:
         with tempfile.TemporaryDirectory() as td:
             t(Path(td))

@@ -60,13 +60,22 @@ def _find_arena_rect() -> Optional[tuple[int, int, int, int]]:
         class RECT(ctypes.Structure):
             _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
                         ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+        # Client area, not GetWindowRect: the window rect includes the title
+        # bar and Win10/11's invisible resize borders, which would shift every
+        # pixel ~30px against the slot lattice (calibrated on client-area-only
+        # screenshots, 2026-10-12) and make the pack read as empty.
+        class POINT(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
         r = RECT()
-        if not user32.GetWindowRect(hwnd, ctypes.byref(r)):
+        if not user32.GetClientRect(hwnd, ctypes.byref(r)):
+            return None
+        origin = POINT(0, 0)
+        if not user32.ClientToScreen(hwnd, ctypes.byref(origin)):
             return None
         w, h = r.right - r.left, r.bottom - r.top
         if w < 200 or h < 200:      # sanity: not a real game window
             return None
-        return (r.left, r.top, w, h)
+        return (origin.x, origin.y, w, h)
     return None
 
 

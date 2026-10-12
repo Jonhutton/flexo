@@ -82,7 +82,14 @@ def parse_ratings_csv(path: Path) -> dict:
 
 def find_ratings_csv(data_dir: Path, set_code: str,
                      explicit: Optional[str] = None) -> Optional[Path]:
-    """Locate a 17Lands CSV export for this set.
+    """The preferred (newest) 17Lands CSV export for this set, or None."""
+    found = find_ratings_csvs(data_dir, set_code, explicit)
+    return found[0] if found else None
+
+
+def find_ratings_csvs(data_dir: Path, set_code: str,
+                      explicit: Optional[str] = None) -> list:
+    """Every candidate 17Lands CSV export for this set, preferred first.
 
     Checked in order: an explicit config path, conventional per-set filenames,
     then any `card-ratings*.csv` lying in the data dir or the repo root (that's
@@ -90,16 +97,17 @@ def find_ratings_csv(data_dir: Path, set_code: str,
     """
     if explicit:
         p = Path(explicit)
-        return p if p.exists() else None
+        return [p] if p.exists() else []
 
     data_dir = Path(data_dir)
     roots = [data_dir, data_dir.parent]
     code = set_code.lower()
+    named: list[Path] = []
     for root in roots:
         for stem in (f"17lands_{code}", code, set_code.upper()):
             p = root / f"{stem}.csv"
             if p.exists():
-                return p
+                named.append(p)
 
     loose: list[Path] = []
     for root in roots:
@@ -107,7 +115,7 @@ def find_ratings_csv(data_dir: Path, set_code: str,
             loose.extend(sorted(root.glob("card-ratings*.csv")))
     # Newest first: a fresh download for the current set should win.
     loose.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return loose[0] if loose else None
+    return named + loose
 
 
 class SeventeenLands:
@@ -162,10 +170,44 @@ class SeventeenLands:
         return _has_wr(index)
 
     def _load_csv(self, set_code: str, known_names: Optional[list]) -> dict:
-        """Load a CSV export for this set, if one is present and plausible."""
-        path = find_ratings_csv(self.data_dir, set_code, self.csv_path)
-        if path is None:
-            return {}
+        """Load the newest CSV export for this set, filling its gaps from older ones.
+
+        17Lands blanks GIH WR below a sample threshold, so a fresh export (or a
+        newer, smaller format like Quick Draft) can be missing most rares and
+        mythics that an older/bigger export rated. A card with no number falls
+        to a rarity prior in the picker -- i.e. Flexo guesses on the bombs. Any
+        card the newest file leaves blank takes its row from the newest older
+        export that has one (seen 2026-10-12: the FRA Quick Draft export left
+        104 cards blank, 85 of them rares/mythics).
+        """
+        index: dict = {}
+        primary = None
+        for path in find_ratings_csvs(self.data_dir, set_code, self.csv_path):
+            rows = self._read_csv(path, set_code, known_names)
+            if not rows:
+                continue
+            if primary is None:
+                primary, index = path, rows
+                continue
+            filled = 0
+            for name, rec in rows.items():
+                if rec.get("gih_wr") is None:
+                    continue
+                if (index.get(name) or {}).get("gih_wr") is None:
+                    index[name] = {**rec, "from_file": path.name}
+                    filled += 1
+            if filled:
+                print(f"[17Lands]   +{filled} win rate(s) filled from {path.name}",
+                      flush=True)
+        if primary is not None:
+            rated = sum(1 for v in index.values() if v.get("gih_wr") is not None)
+            print(f"[17Lands] using {primary.name}: {len(index)} cards, "
+                  f"{rated} with GIH WR.", flush=True)
+        return index
+
+    def _read_csv(self, path: Path, set_code: str,
+                  known_names: Optional[list]) -> dict:
+        """One CSV export, or {} if unreadable, rate-less, or another set's."""
         try:
             index = parse_ratings_csv(path)
         except Exception as e:
@@ -189,10 +231,6 @@ class SeventeenLands:
                       f"Ignoring it; set seventeen_lands.csv_path to override.",
                       flush=True)
                 return {}
-
-        rated = sum(1 for v in index.values() if v.get("gih_wr") is not None)
-        print(f"[17Lands] using {path.name}: {len(index)} cards, "
-              f"{rated} with GIH WR.", flush=True)
         return index
 
     def data_confidence(self) -> str:
